@@ -17,10 +17,12 @@
  *  2019-03-02: Initial
  *  2019-11-15: Import URL
  *  2020-02-29: Changed namespace
+ *  2020-05-19: Snapshot preference
  *
  */
 
 import groovy.json.JsonSlurper
+import groovy.transform.Field
 
 metadata {
   definition(name: "Ring Virtual Light with Siren", namespace: "ring-hubitat-codahq", author: "Ben Rimmasch",
@@ -42,6 +44,7 @@ metadata {
   preferences {
     input name: "lightPolling", type: "bool", title: "Enable polling for light status on this device", defaultValue: false
     input name: "lightInterval", type: "number", range: 10..600, title: "Number of seconds in between light polls", defaultValue: 15
+    input name: "snapshotPolling", type: "bool", title: "Enable polling for thumbnail snapshots on this device", defaultValue: false
     input name: "strobeTimeout", type: "enum", title: "Strobe Timeout", options: [[30: "30s"], [60: "1m"], [120: "2m"], [180: "3m"]], defaultValue: 30
     input name: "strobeRate", type: "enum", title: "Strobe rate", options: [[1000: "1s"], [2000: "2s"], [5000: "5s"]], defaultValue: 1000
     input name: "descriptionTextEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: false
@@ -49,6 +52,8 @@ metadata {
     input name: "traceLogEnable", type: "bool", title: "Enable trace logging", defaultValue: false
   }
 }
+
+@Field static def LAST_ACTIVITY_THRESHOLD = 60 //minutes
 
 private logInfo(msg) {
   if (descriptionTextEnable) log.info msg
@@ -101,6 +106,7 @@ def pollLight() {
 
 def updated() {
   setupPolling()
+  parent.snapshotOption(device.deviceNetworkId, snapshotPolling)
 }
 
 def on() {
@@ -174,7 +180,9 @@ def childParse(type, params) {
   logTrace "type ${type}"
   logTrace "params ${params}"
 
-  sendEvent(name: "lastActivity", value: convertToLocalTimeString(new Date()), displayed: false, isStateChange: true)
+  if (canReportLastActivity()) {
+    sendEvent(name: "lastActivity", value: convertToLocalTimeString(new Date()), displayed: false, isStateChange: true)
+  }
 
   if (type == "refresh") {
     logTrace "refresh"
@@ -191,6 +199,15 @@ def childParse(type, params) {
   else {
     log.error "Unhandled type ${type}"
   }
+}
+
+def canReportLastActivity() {
+  def now = new Date().getTime()
+  if (state.lastActivity == null || now > (state.lastActivity + (LAST_ACTIVITY_THRESHOLD * 60 * 1000))) {
+    state.lastActivity = now
+    return true
+  }
+  return false
 }
 
 private handleRefresh(json) {

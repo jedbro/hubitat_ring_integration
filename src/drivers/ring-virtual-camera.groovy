@@ -19,6 +19,7 @@
  *  2019-11-15: Import URL
  *  2019-11-18: Differentiated between ring and motion events
  *  2020-02-29: Changed namespace
+ *  2020-05-19: Snapshot preference
  *
  */
 
@@ -39,6 +40,7 @@ metadata {
   }
 
   preferences {
+    input name: "snapshotPolling", type: "bool", title: "Enable polling for thumbnail snapshots on this device", defaultValue: false
     input name: "descriptionTextEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: false
     input name: "logEnable", type: "bool", title: "Enable debug logging", defaultValue: false
     input name: "traceLogEnable", type: "bool", title: "Enable trace logging", defaultValue: false
@@ -63,6 +65,7 @@ def configure() {
 
 def updated() {
   checkChanged("numberOfButtons", 1)
+  parent.snapshotOption(device.deviceNetworkId, snapshotPolling)
 }
 
 def parse(String description) {

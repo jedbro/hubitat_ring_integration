@@ -20,6 +20,7 @@
  *  2020-01-09: Fixed update to HSM status to only happen when necessary
  *              Added fireAlarm attribute to hold fire alarm status
  *  2020-02-29: Changed namespace
+ *  2020-05-16: Fixed base station brightness command
  *
  */
 
@@ -209,7 +210,8 @@ def setBrightness(brightness) {
   logDebug "Attempting to set brightness ${brightness}."
   brightness = brightness > 100 ? 100 : brightness
   brightness = brightness < 0 ? 0 : brightness
-  parent.simpleRequest("set-brightness-keypad", [dst: device.getDataValue("hub.redsky-zid"), brightness: brightness as Integer])
+  def data = ["brightness": (brightness == null ? 100 : brightness).toDouble() / 100]
+  parent.simpleRequest("setdevice", [zid: device.getDataValue("hub.redsky-zid"), dst: device.getDataValue("src"), data: data])
 }
 
 private getRING_TO_HSM_MODE_MAP() {

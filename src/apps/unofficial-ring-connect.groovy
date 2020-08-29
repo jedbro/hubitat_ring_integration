@@ -36,6 +36,16 @@
  *  2020-02-29: Chime Pro v2 support
  *              Removed session functionality since it's no longer needed
  *              Changed namespace
+ *  2020-05-11: Made 2FA true and read-only
+ *              Support for non-alarm modes (Ring Modes)
+ *              Support to auto-create hub/bridge devices
+ *              Changes to make dual app, multi-location available (but not implemented yet)
+ *              IFTTT page enhancements
+ *              Create device enhancements
+ *  2020-05-17  Scheduled refresh OAuth token
+ *              Cleaned up initialize and scheduling so polling would persist better after restarts
+ *  2020-05-19  Snapshot (camera thumbnails) support with documentation, polling and configuration links
+ *              Updated user agent on some API calls. This may cause a new device to show logged in under Ring Control Center
  *  2020-07-22: Added support for second device ID of wired Spotlight Cam
  *
  *
@@ -72,18 +82,28 @@ preferences {
   page(name: "notifications")
   page(name: "ifttt")
   page(name: "pollingPage")
+  page(name: "snapshots")
+  page(name: "snapshotConfig")
+  page(name: "dashboardHelp")
   page(name: "logging")
   page(name: "hardwareIdReset")
 
 }
 
 def login() {
-  dynamicPage(name: "login", title: "Log into Your Ring Account", nextPage: twofactor ? "secondStep" : "locations", uninstall: true) {
+  //since we're forcing 2FA...  by the way, the two factor toggle is left in on purpose so that people see the change Ring made and it's a cue to hunt up the token
+  app.updateSetting("twofactor", [value: "true", type: "bool"])
+  dynamicPage(name: "login", title: "Log into Your Ring Account", nextPage: /*twofactor ? */ "secondStep"/* : "locations"*/, uninstall: true) {
     section("Ring Account Information") {
+      paragraph '<script type="application/javascript">\n' +
+        'var checkbox = $("#settings\\\\[twofactor\\\\]");\n' +
+        'checkbox.prop("checked", true);\n' +
+        'checkbox.click(function(){return false;});\n' +
+        '</script>'
       preferences {
         input "username", "email", title: "Ring Username", description: "Email used to login to Ring.com", displayDuringSetup: true, required: true
         input "password", "password", title: "Ring Password", description: "Password you login to Ring.com", displayDuringSetup: true, required: true
-        input name: "twofactor", type: "bool", title: "2FA Enabled", description: "Toggle on if 2FA is enabled", displayDuringSetup: true, defaultValue: false, submitOnChange: true
+        input name: "twofactor", type: "bool", title: "2FA Enabled", description: "Toggle on if 2FA is enabled", displayDuringSetup: true, defaultValue: true, submitOnChange: true
       }
     }
   }
@@ -98,7 +118,7 @@ def secondStep() {
     return dynamicPage(name: "secondStep", title: "Authenticate failed!  Please check your Ring username and password", nextPage: "login", uninstall: true) {
     }
   }
-  dynamicPage(name: "secondStep", title: "Check text messages for the 2-step authentication code", nextPage: "locations", uninstall: true) {
+  dynamicPage(name: "secondStep", title: "Check text messages or email for the 2-step authentication code", nextPage: "locations", uninstall: true) {
     section("2-Step Code") {
       input "twoStepCode", "password", title: "Code", description: "2-Step Temporary Code", displayDuringSetup: false, required: true
     }
@@ -135,20 +155,19 @@ def mainPage() {
 
   //getNotifications()
 
-  def locations = []
-  state.locationOptions.each { location ->
-    if (selectedLocations.contains(location.key) || selectedLocations.equals(location.key)) {
-      locations << location.value
-    }
-  }
+  def location = getSelectedLocation()
+  logTrace "location: $location"
 
   dynamicPage(name: "mainPage", title: "Manage Your Ring Devices", nextPage: null, uninstall: true, install: true) {
     section("Ring Account Information    (<b>${loggedIn() ? 'Successfully Logged In!' : 'Not Logged In. Please Configure!'}</b>)") {
       href "login", title: "Log into Your Ring Account", description: ""
     }
 
-    if (locations) {
-      section("Configure Devices For Location:    <b>${locations.join(", ")}</b>") {
+    if (location) {
+      if (!getAPIDevice(location)) {
+        section("There was an issue finding/migrating your API device!  Please check the logs!") {}
+      }
+      section("Configure Devices For Location:    <b>${location.name}</b>") {
         href "deviceDiscovery", title: "Discover Devices", description: ""
       }
     }
@@ -166,6 +185,10 @@ def mainPage() {
       href "notifications", title: "Configure the way that Hubitat will get motion alert and ring events", description: ""
     }
 
+    section("Camera Thumbnail Images") {
+      href "snapshots", title: "Configure the way that Hubitat will get camera thumbnail images", description: ""
+    }
+
     section("Logging") {
       href "logging", title: "Configure logging", description: ""
     }
@@ -175,17 +198,19 @@ def mainPage() {
 
 def notifications() {
   setupDingables()
-  dynamicPage(name: "notifications", title: "Configure the way that Hubitat will get motion alert and ring events:", uninstall: false) {
-    section("IFTTT (Webhooks)") {
-      href "ifttt", title: "IFTTT Information", description: ""
+  dynamicPage(name: "notifications", title: "Configure the way that Hubitat will get motion alert and ring events.  Choose one of the following methods.  IFTTT is highly preferred.", nextPage: "mainPage", uninstall: false) {
+    section("") {
+      href "ifttt", title: "IFTTT Integration and Documenation for Motion and Ring Alerts", description: ""
     }
-    section("Polling") {
-      href "pollingPage", title: "Configure polling for motion alerts and rings", description: ""
+    section("") {
+      href "pollingPage", title: "Configure Polling for Motion and Ring Alerts", description: ""
     }
   }
 }
 
 def ifttt() {
+
+  def oauthEnabled = isOAuthEnabled()
 
   setupDingables()
 
@@ -204,10 +229,13 @@ def ifttt() {
   def imgStyle = "max-width: 100%; max-height: 100vh; margin: auto;"
   def screenshotDiv = "<div style=\"${divStyle}\" ><img style=\"${imgStyle}\" src=\"${iftttScreenshotData}\" alt=\"Screenshot\" /></div>"
 
-  dynamicPage(name: "ifttt", title: "Information about using IFTTT to receive motion and ring events:", uninstall: false) {
-    section('<b style="font-size: 22px;">IFTTT</b>') {
-      paragraph("IFTTT is a service that provides interoperability between many cloud services.  Ring has implemented this service for ring and motion events.  Another service in IFTTT enables web service calls (Webhooks).  The overall control flow will start with a motion event or ring event at your Ring device.  The device will notify the Ring cloud of the event.  The Ring cloud will notify the IFTTT cloud of the event.  The IFTTT cloud will make a web service call to the Hubitat cloud.  The Hubitat cloud will push that call to the hub locally.  The app will process it and send it to the correct device.")
-      paragraph("For all of this to function correctly a few things must be setup.  This app (the Hubitat \"Unofficial Ring Connect\") must be configured for OAuth.  This is so to allow authenticatd, wanted, inbound web service calls that can be routed to your hub.")
+  dynamicPage(name: "ifttt", title: '<b style="font-size: 25px;">Using IFTTT To Receive Motion and Ring Events</b>', uninstall: false) {
+    section('<b style="font-size: 22px;">About IFTTT</b>') {
+      paragraph("IFTTT is a service that provides interoperability between many cloud services.  Ring has implemented IFTTT triggers for ring and motion events.  Triggers allow actions to run.  One of the actions that IFTTT supports are web service calls (Webhooks).  The overall control flow will start with a motion event or ring event at your Ring device.  The device will notify the Ring cloud of the event.  The Ring cloud will notify the IFTTT cloud of the event.  The IFTTT cloud will make a web service call to the Hubitat cloud.  The Hubitat cloud will push that call to the hub locally.  The app will process it and send it to the correct device.")
+      paragraph("For the above to function correctly a few things must be setup.  This app (the Hubitat \"Unofficial Ring Connect\") must be configured for OAuth.  This is so to allow authenticatd, wanted, inbound web service calls that can be routed to your hub.")
+      if (!oauthEnabled) {
+        paragraph('<b style="color: red;">OATH is not currently enabled under the "OAuth" button in the app code editor for this app.  This is required if IFTTT will be used to receive motion and ring events.</b>')
+      }
       paragraph("An IFTTT applet must be configured for each event type for each device.  Here are the Hubitat DNI (device network IDs) of the devices that are probably supported in IFTTT:")
       paragraph(state.dingables.collect { getFormattedDNI(it) }.join("\n"))
     }
@@ -215,9 +243,10 @@ def ifttt() {
       paragraph(
         "- OAuth enabled on this app.  You can do this from the \"Apps Code\" section of the Hubitat UI\n" +
           "- An IFTTT account\n" +
-          "- The Ring service authorized to your IFTTT account\n" +
-          "- A device from Ring that supports the motion and/or ring events shared through the Ring services authorization\n" +
-          "- The Webhooks service authorized to your IFTTT account. (This appears to be done already for new accounts.)\n"
+          "- The Ring service authorized to your IFTTT account (<a href=\"https://ifttt.com/ring\" target=\"_blank\">https://ifttt.com/ring</a>)\n" +
+          "- A Ring device that supports motion and/or ring events in IFTTT\n" +
+          "- The above device authorized to IFTTT through the Ring IFTTT service\n" +
+          "- The ability to use the Webhooks actions on your IFTTT account (This appears to be configured by default for new IFTTT accounts.)\n"
       )
     }
     section('<b style="font-size: 22px;">Steps to create IFTTT Applets</b>') {
@@ -234,12 +263,6 @@ def ifttt() {
           "- Click \"Create action\" and test the results."
       )
       paragraph("<b>You must visit <a href=\"https://ifttt.com\" target=\"_blank\">https://ifttt.com</a> to configure the applets.</b>")
-    }
-    section('<b style="font-size: 22px;">Resetting the OAuth Access Token</b>') {
-      paragraph("<b>Do not toggle this button without understanding the following.</b>  Resetting this token will require you to update all of the URLs in any existing IFTTT applets.  There is no need to reset the token unless it was compromised.")
-      preferences {
-        input name: "tokenReset", type: "bool", title: "Toggle this to reset your app's OAuth token", defaultValue: false, submitOnChange: true
-      }
     }
     section('<b style="font-size: 22px;">Webhooks URL</b>') {
       def iftttPath = "<b>${getFullApiServerUrl()}/ifttt?access_token=${atomicState.accessToken}</b>"
@@ -272,28 +295,148 @@ def ifttt() {
     section('<b style="font-size: 22px;">Example Applet Screenshot</b>') {
       paragraph(screenshotDiv)
     }
-
+    section('<b style="font-size: 22px;">Resetting the OAuth Access Token</b>') {
+      paragraph("<b style=\"color: red;\">Do not toggle this button without understanding the following.</b>  Resetting this token will require you to update all of the URLs in any existing IFTTT applets <b>AS WELL AS</b> any snapshot URL in snapshot dashboard tiles.  There is no need to reset the token unless it was compromised.")
+      preferences {
+        input name: "tokenReset", type: "bool", title: "Toggle this to reset your app's OAuth token", defaultValue: false, submitOnChange: true
+      }
+    }
   }
 }
 
 def pollingPage() {
 
-  unschedule(pollDings)
-  if (dingPolling) {
-    setupDingables()
-    pollDings()
-  }
+  configureDingPolling()
 
-  dynamicPage(name: "pollingPage", title: "Configure settings to poll for motions and rings:", uninstall: false) {
-    section('<b style="color: red; font-size: 22px;">WARNING!!!  ADVERTENCIA!!!  ACHTUNG!!!</b>') {
+  dynamicPage(name: "pollingPage", uninstall: false) {
+    section('<b style="color: red; font-size: 22px;">WARNING!!  ADVERTENCIA!!  ACHTUNG!!  AVERTISSEMENT!!</b>') {
       paragraph("Polling too quickly can have adverse affects on performance of your hubitat hub and may even get your Ring account temporarily or permanently locked.  As of November 2019 no known action has been taken by Ring to prevent polling but there is no gaurantee of this in the future.")
       paragraph("<u>This is true for not only motion and ring event polling but for light status polling which can be configured on each individual device.</u>")
-      paragraph("<b><u>It is recommended to use the IFTTT method to receive notifcations instead of polling.</u></b>")
+      paragraph("<b>It is recommended to use the IFTTT method to receive notifcations instead of polling.</b>")
     }
-    section("Polling Configuration") {
+    section("<b><u>Configure settings to poll for motions and rings:</u></b>") {
       preferences {
         input name: "dingPolling", type: "bool", title: "Poll for motion and rings", defaultValue: false, submitOnChange: true
         input name: "dingInterval", type: "number", range: "8..20", title: "Number of seconds in between motion/ring polls", defaultValue: 15, submitOnChange: true
+      }
+    }
+  }
+}
+
+def snapshots() {
+  dynamicPage(name: "snapshots", title: "Camera Thumbnail Images:", nextPage: "mainPage", uninstall: false) {
+    section("") {
+      href "snapshotConfig", title: "Snapshot Configuration", description: ""
+    }
+    section("") {
+      href "dashboardHelp", title: "Viewing Snapshots and Dashboard Configuration", description: ""
+    }
+  }
+}
+
+def snapshotConfig() {
+  configureSnapshotPolling()
+  dynamicPage(name: "snapshotConfig", nextPage: "snapshots", uninstall: false) {
+    section('<b style="color: red; font-size: 22px;">WARNING!!  ADVERTENCIA!!  ACHTUNG!!  AVERTISSEMENT!!</b>') {
+      paragraph("Retrieving thumbnail images may have adverse affects on performance of your hubitat hub.")
+    }
+    section("<b><u>Configure Settings to Poll for Camera Thumbnail Images:</u></b>") {
+      preferences {
+        input name: "snapshotPolling", type: "bool", title: "Poll for camera thumbnails", defaultValue: false, submitOnChange: true
+        input name: "snapshotInterval", type: "enum", title: "Interval between thumbnail refresh", required: true, options: snapshotInvertals, defaultValue: [120]
+      }
+    }
+  }
+}
+
+def dashboardHelp() {
+  def oauthEnabled = isOAuthEnabled()
+
+  setupDingables()
+
+  def ringables = state.dingables.findAll {
+    RINGABLES.contains(getChildDevice(getFormattedDNI(it)).getDataValue("kind"))
+  }
+
+  if (tokenReset) {
+    app.updateSetting("tokenReset", false)
+    state.accessToken = null
+    createAccessToken()
+  }
+
+  dynamicPage(name: "dashboardHelp", title: '<b style="font-size: 25px;">Snapshots in Dashboards</b>', uninstall: false, nextPage: "snapshots") {
+    section('<b style="font-size: 22px;">About Snapshot Polling</b>') {
+      paragraph("The snapshots provided by this app will only work when accessing them locally.  The image thumbnails cannot be made available via the cloud for several reasons which will not be discussed here.  If you try to access the dashboards with these images they will only display locally (when on the same network as the hub).")
+      paragraph("Normally Ring only polls your devices for snapshots when an app on your account is open that needs image thumbnails.  For example, new camera thumnails will not be pulled unless you have the dashboard open on the phone app.  Instead of requiring you to have the phone app open all of the time the Hubitat \"Unofficial Ring Connect\" app can get around this by requesting that Ring update the snapshos manually.")
+      paragraph("This has several side effects.")
+      paragraph("One, internet usage will go up very slightly.  Each thumbnail is approximately 10KB to 20KB and there is additional overhead to request them.  This is very likely no where near enough to worry about ISP bandwidth caps but it is something to be aware of.")
+      paragraph("Two, your electrical power usage will go up.  If you have the <a href=\"https://shop.ring.com/pages/protect-plans\">Basic Plan's</a> \"Snapshot Capture\" feature enabled you will not notice much of a difference.  If you do not already have something constantly waking the cameras you may see a noticeable increase.  If the devices are battery powered the period between charges may become significantly smaller.")
+      paragraph("Three, your hub will be under additional load to pull the images which are very large requests compared to the requests that are typically happening for dashboards and automations.  This is likely the primary factor to consider when deciding whether or not to enable snapshot polling and usage.  The additional load, especially if dashboards are left open, may be enough to leave some hub configurations sluggish.")
+      if (!oauthEnabled) {
+        paragraph('<b style="color: red;">OATH is not currently enabled under the "OAuth" button in the app code editor for this app.  This is required if you wish to embed images in your dashboards.</b>')
+      }
+    }
+    section('<b style="font-size: 22px;">Prerequisites</b>') {
+      paragraph(
+        "- OAuth enabled on this app.  You can do this from the \"Apps Code\" section of the Hubitat UI\n" +
+          "- A device that supports snapshots on the phone app's dashboard\n" +
+          "- Images will only be available when the cameras are able to display snapshots in the Ring app's \"Dashboard\" view. This can be configured in the Ring app's Mode settings or on the individual camera's device settings.\n"
+      )
+    }
+    section('<b style="font-size: 22px;">Steps to include snapshots on a dashboard</b>') {
+      paragraph("These steps must be performed for each of the cameras to be included.")
+      paragraph(
+        "- In the dashboard that will show the thumbnail image click the \"+\" button to add a new tile.\n" +
+          "- Choose a placement for the tile on the dashboard with the column, row, height and width arrow controls.\n" +
+          "- No device is necessary so DO NOT pick one in the \"Pick A Device\" list.  Instead pick \"Image\" from the template list.\n" +
+          "- At the bottom of this page are listed all the available camera URLs.  Copy and paste the desired camera's URL into the \"Background Image Link\" field or \"Image URL\".  If you use the \"Background Image Link\" the image will fill the entire tile.  If you use \"Image URL\" the tile will display letter boxes.\n" +
+          "- Leave \"Background Image Link\" blank.\n" +
+          "- Choose a \"Refresh Interval (seconds)\" that is greater than or equal to the refresh interval you chose in snapshot configuration. (You chose ${snapshotInterval} seconds.)\n" +
+          "- Click the \"Add Tile\" button."
+      )
+    }
+    section('<b style="font-size: 22px;">Required Device Configurations</b>') {
+      paragraph("Here are the Hubitat DNI (device network IDs) of the devices that are currently opted into snapshot polling:")
+      paragraph(state.snappables.collect { it.key }.join("\n"))
+      paragraph(
+        "<u>To configure snapshots you will need to activate \"Enable polling for thumbnail snapshots on this device\" for the device you want to see. The links below will bring you to the device configuration pages</u>:\n\n" +
+          state.dingables.collect {
+            def d = getChildDevice(getFormattedDNI(it))
+            def url = "${getLocalApiServerUrl().replace("/apps/api", "")}/device/edit/${d.id}"
+            "<a href=\"${url}\" target=\"_blank\">${d.label}</a>"
+          }.join("\n")
+      )
+    }
+    section('<b style="font-size: 22px;">Snapshots and URLs</b>') {
+      def imagePath = "<b>${getLocalApiServerUrl()}/${app.id}/snapshot/[Device ID]?access_token=${atomicState.accessToken}</b>"
+      paragraph(imagePath)
+      paragraph(
+        "The URL breaks down into the following pieces:\n" +
+          "- \"${getLocalApiServerUrl().replace("apps/api", "")}\" -- The local URL to the hub\n" +
+          "- \"apps/api\" -- The path to access the apps API\n" +
+          "- \"${app.id}\" -- The app instance ID of the \"Unofficial Ring Connect\" app. This can also be seen in the URL if you go to the app from the \"Apps\" link in the left navigation pane.\n" +
+          "- [Device ID] - The DNI (device network ID) of the camera from which to pull the snapshot. Do not include the square brackets.\n" +
+          "- The last GUID is the access token created by this app using OAuth that requests will use to authenticate to Hubitat. <b>DO NOT</b> disclose this to anybody.  It is like a password.\n"
+      )
+      paragraph("If the URL above is blank or incomplete then you must enable OAuth for this app under \"Apps Code\" in Hubitat where this app was installed.")
+    }
+    section('<b style="font-size: 22px;">Snapshots</b>') {
+      paragraph(
+        state.snappables.findAll { it.value == true }.collect {
+          def url = "${getLocalApiServerUrl()}/${app.id}/snapshot/${it.key}?access_token=${atomicState.accessToken}"
+          "<u><b>" + getChildDevice(it.key).label + ":</b></u>\n" +
+            "<b>URL</b>: ${url}\n" +
+            "<img height=\"180\" width=\"320\" src=\"${url}\" alt=\"Snapshot\" />"
+        }.join("\n\n")
+      )
+      if (state.snappables.findAll { it.value == true }.size() == 0) {
+        paragraph("<b>There are no cameras configured to poll for snapshots.</b>")
+      }
+    }
+    section('<b style="font-size: 22px;">Resetting the OAuth Access Token</b>') {
+      paragraph("<b style=\"color: red;\">Do not toggle this button without understanding the following.</b>  Resetting this token will require you to update all of the URLs in any existing dashboard tile <b>AS WELL AS</b> any URL in any IFTTT applet you have configured.  There is no need to reset the token unless it was compromised.")
+      preferences {
+        input name: "tokenReset", type: "bool", title: "Toggle this to reset your app's OAuth token", defaultValue: false, submitOnChange: true
       }
     }
   }
@@ -351,7 +494,7 @@ def configurePDevice(params) {
       input "${state.currentDeviceId}_label", "text", title: "Device Name", description: "", required: false
       href "changeName", title: "Change Device Name", description: "Edit the name above and click here to change it"
     }
-    if (state.currentDeviceId == getFormattedDNI(RING_API_DNI)) {
+    if (state.currentDeviceId.startsWith(RING_API_DNI)) {
       section {
         paragraph("This is the virtual device that holds the WebSockets connection for your Ring hubs/bridges. You don't need to "
           + "know what this means but I wanted to tell you so I can justify why it had to exist and why you have to create "
@@ -365,8 +508,10 @@ def configurePDevice(params) {
           + "devices is through the web socket so it will only be done through the API device which holds the API device.")
       }
     }
-    section {
-      href "deletePDevice", title: "Delete $state.currentDisplayName", description: ""
+    else {
+      section {
+        href "deletePDevice", title: "Delete $state.currentDisplayName", description: ""
+      }
     }
   }
 }
@@ -425,6 +570,7 @@ def deviceDiscovery(params = [:]) {
     logDebug "Cleaning old device memory"
     state.devices = [:]
     app.updateSetting("selectedDevice", "")
+    getAPIDevice().resetState("alarmCapable")
   }
 
   discoverDevices()
@@ -464,6 +610,8 @@ private discoverDevices() {
   def supportedIds = getDeviceIds()
   logTrace "supportedIds ${supportedIds}"
   state.devices = supportedIds
+  def alarmCapable = (state.devices.find { it.kind == "base_station_v1" }?.size() ?: 0) > 0
+  getAPIDevice().setState("alarmCapable", alarmCapable, "bool-set")
 }
 
 def configured() {
@@ -475,12 +623,6 @@ def installed() {
 }
 
 def updated() {
-  unsubscribe()
-  unschedule(pollDings)
-  if (dingPolling) {
-    setupDingables()
-    pollDings()
-  }
   initialize()
 }
 
@@ -496,7 +638,7 @@ def initialize() {
     }
   }
   catch (ex) {
-    log.warn "Probs need to enable OATH in the app's code, dood/ette.  This is required if IFTTT will be used to receive motion and ring events."
+    log.warn "OATH is not enabled under the \"OAuth\" button in the app code editor.  This is required if IFTTT will be used to receive motion and ring events."
   }
   logDebug "Access token: ${state.accessToken}"
   logDebug "Full API server URL: ${getFullApiServerUrl()}"
@@ -505,6 +647,13 @@ def initialize() {
   //def path = "${getFullApiServerUrl()}/notify?access_token=${atomicState.accessToken}"
   //We'll keep this to ourselves for now.  Maybe some day Ring and Hubitat will partner and it will be used
   //log.info "Notification POST Path: ${path}"
+
+  configureDingPolling()
+  configureSnapshotPolling()
+  if (loggedIn()) {
+    //refresh the token if we have one
+    authenticate()
+  }
 }
 
 mappings {
@@ -515,6 +664,10 @@ mappings {
   path("/ifttt") {
     action:
     [POST: "processIFTTT"]
+  }
+  path("/snapshot/:ringDeviceId") {
+    action:
+    [GET: "serveSnapshot"]
   }
 }
 
@@ -573,63 +726,80 @@ def getDevices() {
 def addDevices() {
   logDebug "addDevices()"
 
-  def devices = getDevices()
+  //def devices = getDevices()
   logTrace "devices ${devices}"
 
+  def apiDevice = getAPIDevice()
+  apiDevice.resetState("createableHubs")
   def sectionText = ""
+  def hubAdded = false
+  selectedDevices.each { id ->
 
-  selectedDevices.each {
-    id ->
+    logTrace "Selected id ${id}"
+    def selectedDevice = devices.find { it.id.toString() == id.toString() }
+    logTrace "Selected device ${selectedDevice}"
 
-      logTrace "Selected id ${id}"
-
-      def selectedDevice = devices.find { it.id.toString() == id.toString() }
-
-      logTrace "Selected device ${selectedDevice}"
-
-      def d
-      if (selectedDevice) {
-        d = getChildDevices()?.find {
-          it.deviceNetworkId == getFormattedDNI(selectedDevice.id)
-        }
+    def d
+    if (selectedDevice) {
+      d = getChildDevices()?.find {
+        it.deviceNetworkId == getFormattedDNI(selectedDevice.id)
       }
+    }
 
-      if (!d) {
-        logDebug selectedDevice
-        log.warn "Creating a ${DEVICE_TYPES[selectedDevice.kind].name} with dni: ${getFormattedDNI(selectedDevice.id)}"
-
-        try {
+    if (!d) {
+      logDebug selectedDevice
+      try {
+        if (isHub(selectedDevice.kind)) {
+          apiDevice.setState("createableHubs", selectedDevice.kind, "array-add")
+          if (!apiDevice.isTypePresent(selectedDevice.kind)) {
+            hubAdded = true
+            sectionText += "Requesting API device to create ${selectedDevice?.name} \r\n"
+          }
+        }
+        else {
+          log.warn "Creating a ${DEVICE_TYPES[selectedDevice.kind].name} with dni: ${getFormattedDNI(selectedDevice.id)}"
           def newDevice = addChildDevice("ring-hubitat-codahq", DEVICE_TYPES[selectedDevice.kind].driver, getFormattedDNI(selectedDevice.id), selectedDevice?.hub, [
-            "label": selectedDevice.id == RING_API_DNI ? DEVICE_TYPES[selectedDevice.kind].driver : (selectedDevice?.name ?: DEVICE_TYPES[selectedDevice.kind].name),
+            "label": selectedDevice?.name ?: DEVICE_TYPES[selectedDevice.kind].name,
             "data": [
               "device_id": selectedDevice.id,
               "kind": selectedDevice.kind,
               "kind_name": DEVICE_TYPES[selectedDevice.kind].name
             ]
           ])
-          if (selectedDevice.id == RING_API_DNI) {
-            //init the websocket connection and set seq to 0
-            newDevice.initialize()
-          }
           newDevice.refresh()
-
-          sectionText = sectionText + "Succesfully added ${DEVICE_TYPES[selectedDevice.kind].name} with DNI ${getFormattedDNI(selectedDevice.id)} \r\n"
+          sectionText = sectionText + "Successfully added ${DEVICE_TYPES[selectedDevice.kind].name} with DNI ${getFormattedDNI(selectedDevice.id)} \r\n"
         }
-        catch (e) {
+      }
+      catch (e) {
+        if (e.toString().replace(DEVICE_TYPES[selectedDevice.kind].driver, "") ==
+          "com.hubitat.app.exception.UnknownDeviceTypeException: Device type '' in namespace 'ring-hubitat-codahq' not found") {
+          def msg = '<b style="color: red;">The "' + DEVICE_TYPES[selectedDevice.kind].driver + '" driver for device "' +
+            DEVICE_TYPES[selectedDevice.kind].name + '" was not found and needs to be installed.</b>\r\n'
+          log.error msg
+          sectionText += msg
+        }
+        else {
           sectionText = sectionText + "An error occured ${e} \r\n"
         }
       }
-      else {
-        d.updateDataValue("kind", selectedDevice.kind)
-        d.updateDataValue("kind_name", DEVICE_TYPES[selectedDevice.kind].name)
-      }
+    }
+    else {
+      d.updateDataValue("kind", selectedDevice.kind)
+      d.updateDataValue("kind_name", DEVICE_TYPES[selectedDevice.kind].name)
+    }
+  }
+
+  if (hubAdded) {
+    //init the websocket connection and set seq to 0. this will add the hub zids to the API device's state.  in addition it will trigger a refresh.
+    //the hubs are always created during a refresh if they do not exist.
+    apiDevice.initialize()
   }
 
   logDebug sectionText
   return dynamicPage(name: "addDevices", title: "Devices Added", nextPage: "mainPage", uninstall: true) {
     if (sectionText != "") {
-      section("IMPORTANT!!!") {
-        paragraph "If you added an Alarm base or Smart Lighting bridge you must now go to that device and click 'Create Devices'.\r\n"
+      section("Please Note!") {
+        paragraph "Alarm base stations, Smart Lighting bridges and all devices connected to them are sub-devices of the API device.\r\n"
       }
       section("Add Ring Device Results:") {
         paragraph sectionText
@@ -658,8 +828,7 @@ def getDeviceIds() {
       logDebug "found a ${node?.kind} at location ${node?.location_id}"
       logTrace "node: ${node}"
       if (DEVICE_TYPES[node?.kind] && selectedLocations.contains(node?.location_id)) {
-        def nodeId = node.kind == "base_station_v1" || node.kind == "beams_bridge_v1" ? RING_API_DNI : node.id
-        acc << [name: "${DEVICE_TYPES[node.kind].name} - ${node.description}", id: nodeId, kind: node.kind]
+        acc << [name: "${DEVICE_TYPES[node.kind].name} - ${node.description}", id: node.id, kind: node.kind]
       }
       acc
       //Stickup Cam - stickup_cam_lunar
@@ -678,103 +847,222 @@ def setupDingables() {
   logDebug "setupDingables()"
   state.dingables = []
   getChildDevices().each { d ->
-    logTrace "d's kind: ${d.getDataValue("kind")}"
-    if (d.getDataValue("kind") == null) {
-      d.properties.each { log.warn it }
-    }
+    logTrace "Checking device kind if dingable: ${d.getDataValue("kind")}"
     if (DEVICE_TYPES[d.getDataValue("kind")].dingable) {
       state.dingables << d.getDataValue("device_id")
     }
   }
 }
 
-def pollDings() {
+def configureDingPolling() {
+  unschedule(getDings)
+  if (dingPolling) {
+    setupDingables()
+    runIn(dingInterval, getDings)
+  }
+
+  /*
+  //schedule("0/${dingInterval} * * * * ? *", getDings)
+
   simpleRequest("dings")
   if (dingPolling) {
     runIn(dingInterval, pollDings)
   }
+
+
+  unschedule(pollDings)
+  if (dingPolling) {
+    setupDingables()
+    pollDings()
+  }
+
+  unschedule(pollDings)
+  if (dingPolling) {
+    setupDingables()
+    pollDings()
+  }
+  */
 }
 
-
-private getRING_API_DNI() {
-  return "WS_API_DNI"
+def getDings() {
+  simpleRequest("dings")
+  if (dingPolling) {
+    runIn(dingInterval, getDings)
+  }
 }
 
-def getRINGABLES() {
-  return [
-    "doorbell",
-    "doorbell_v3",
-    "doorbell_v4",
-    "doorbell_v5",
-    "doorbell_portal",
-    "doorbell_scallop_lite",
-    "doorbell_scallop",
-    "lpd_v1",
-    "lpd_v2",
-    "jbox_v1"
-  ]
+def configureSnapshotPolling() {
+  logDebug "configureSnapshotPolling()"
+  unschedule(prepSnapshots)
+  unschedule(prepSnapshotsAlt)
+  unschedule(getSnapshots)
+  if (snapshotPolling) {
+    logInfo "Snapshot polling started with an interval of ${snapshotInvertals[snapshotInterval as Integer].toLowerCase()}."
+    setupDingables()
+
+    //let's spread schedules out so that there is some randomness in how we hit the ring api
+    int interval = snapshotInterval != null ? snapshotInterval.toInteger() : 600
+    logTrace "interval: $interval"
+    java.time.LocalDateTime now = java.time.LocalDateTime.now()
+    int currSec = now.getSecond()
+    int altSec = (currSec + 30) > 59 ? currSec - 30 : currSec + 30
+    int currMin = now.getMinute()
+
+    switch (interval) {
+      case 30:
+        def secString = currSec > alt ? "${altSec},${currSec}" : "${currSec},${altSec}"
+        schedule("${secString} * * * * ? *", prepSnapshots)
+        break
+      case 60:
+        schedule("${currSec} * * * * ? *", prepSnapshots)
+        break
+      case 90:
+        int index = minuteSpans.find { it.value.contains(currMin) }.key
+        int offset = currSec + 30 > 59 ? 1 : 0
+        schedule("${currSec} ${minuteSpans[index].join(",")} * * * ? *", prepSnapshots)
+        schedule("${altSec} ${minuteSpans[(index + 1 + offset) % 3].join(",")} * * * ? *", prepSnapshotsAlt)
+        break
+      case 120..1800: //minutes
+        int mins = interval / 60
+        schedule("${currSec} ${currMin % mins}/${mins} * * * ? *", prepSnapshots)
+        break
+      case 3600..43200: //hours
+        def hours = interval / 60 / 60
+        schedule("${currSec} ${currMin} 0/${hours} * * ? *", prepSnapshots)
+        break
+      case 86400: //days
+        schedule("${currSec} ${currMin} ${now.getHour()} 0 * ? *", prepSnapshots)
+        break
+    }
+  }
 }
 
-private getDEVICE_TYPES() {
-  return [
+@Field static def minuteSpans = [
+  0: [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57],
+  1: [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46, 49, 52, 55, 58],
+  2: [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35, 38, 41, 44, 47, 50, 53, 56, 59]
+]
 
-    "hp_cam_v1": [name: "Ring Floodlight Cam", driver: "Ring Virtual Light with Siren", dingable: true],
-    "hp_cam_v2": [name: "Ring Spotlight Cam Wired", driver: "Ring Virtual Light with Siren", dingable: true],
-    "spotlightw_v2": [name: "Ring Spotlight Cam Wired", driver: "Ring Virtual Light with Siren", dingable: true],
-    "floodlight_v2": [name: "Ring Floodlight Cam Wired", driver: "Ring Virtual Light with Siren", dingable: true],
-    "stickup_cam": [name: "Ring Original Stick Up Cam", driver: "Ring Virtual Camera", dingable: true],
-    "stickup_cam_v3": [name: "Ring Stick Up Cam", driver: "Ring Virtual Camera", dingable: true],
-    "stickup_cam_v4": [name: "Ring Spotlight Cam Battery", driver: "Ring Virtual Light", dingable: true],
-    "stickup_cam_lunar": [name: "Ring Stick Up Cam Battery", driver: "Ring Virtual Camera with Siren", dingable: true],
-    "cocoa_camera": [name: "Ring Stick Up Cam Battery", driver: "Ring Virtual Camera with Siren", dingable: true],
-    "stickup_cam_elite": [name: "Ring Stick Up Cam Wired", driver: "Ring Virtual Camera with Siren", dingable: true],
-    "stickup_cam_mini": [name: "Ring Indoor Cam", driver: "Ring Virtual Camera with Siren", dingable: true],
-    "doorbell": [name: "Ring Video Doorbell", driver: "Ring Virtual Camera", dingable: true],
-    "doorbell_v3": [name: "Ring Video Doorbell", driver: "Ring Virtual Camera", dingable: true],
-    "doorbell_v4": [name: "Ring Video Doorbell 2", driver: "Ring Virtual Camera", dingable: true],
-    "doorbell_v5": [name: "Ring Video Doorbell 2", driver: "Ring Virtual Camera", dingable: true],
-    "doorbell_scallop_lite": [name: "Ring Video Doorbell 3", driver: "Ring Virtual Camera", dingable: true],
-    "doorbell_scallop": [name: "Ring Video Doorbell 3 Plus", driver: "Ring Virtual Camera", dingable: true],
-    "doorbell_portal": [name: "Ring Peephole Cam", driver: "Ring Virtual Camera", dingable: true],
-    "lpd_v1": [name: "Ring Video Doorbell Pro", driver: "Ring Virtual Camera", dingable: true],
-    "lpd_v2": [name: "Ring Video Doorbell Pro 2", driver: "Ring Virtual Camera", dingable: true],
-    "jbox_v1": [name: "Ring Video Doorbell Elite", driver: "Ring Virtual Camera", dingable: true],
-    "chime": [name: "Ring Chime", driver: "Ring Virtual Chime", dingable: false],
-    "chime_pro": [name: "Ring Chime Pro", driver: "Ring Virtual Chime", dingable: false],
-    "chime_pro_v2": [name: "Ring Chime Pro (v2)", driver: "Ring Virtual Chime", dingable: false],
-    "base_station_v1": [name: "Ring Alarm (API Device)", driver: "Ring API Virtual Device", dingable: false],
-    "beams_bridge_v1": [name: "Ring Bridge (API Device)", driver: "Ring API Virtual Device", dingable: false]
+def prepSnapshots() {
+  if (!state.snappables) {
+    state.snappables = [:]
+  }
+  def snappables = state.snappables.findAll { it.value }
 
-  ]
+  //Ring stops asking all the cameras for new snapshots if this is not called frequently
+  //simpleRequest("snapshot-update")
+
+  //alternatively it looks like we can get the snapshot timestamps and it updates snapshots for just individual cameras.  this is desired so battery powered devices can sleep if the user wants them to
+  simpleRequest("snapshot-timestamps", [snappables: snappables.collect { getRingDeviceId(it.key) as Integer }])
+
+  runIn(15, getSnapshots)
 }
 
-private getGET() {
-  return 'httpGet'
+//used for 90 second interval where two schedules are required. a method is only allowed to be scheduled once. it overwrites the old schedule if scheduled again.
+def prepSnapshotsAlt() {
+  prepSnapshots()
 }
 
-private getPOST() {
-  return 'httpPost'
+def getSnapshots() {
+  logDebug "getSnapshots()"
+
+  if (!state.snapshots) {
+    state.snapshots = [:]
+  }
+
+  def snappables = state.snappables.findAll { it.value }
+  snappables.each {
+    def str = simpleRequest("snapshot-image-tmp", [dni: it.key])
+    logTrace "Snapshot for ${it.key} updated"
+
+    state.snapshots[(it.key)] = str
+  }
 }
 
-private getPUT() {
-  return 'httpPut'
+def serveSnapshot() {
+  logDebug "serveSnapshot(${params.ringDeviceId})"
+  logTrace "params: $params"
+
+  // Get the device
+  def d = getChildDevice(params.ringDeviceId)
+  if (d == null) {
+    log.error "Could not locate a device with an id of ${params.ringDeviceId}"
+    return ["error": true, "type": "SmartAppException", "message": "Not Found"]
+  }
+
+  byte[] img = state.snapshots[params.ringDeviceId]?.toArray() as byte[]
+  imageResponse(img)
 }
 
-private getJSON() {
-  return 'application/json'
+def imageResponse(byte[] img) {
+
+  /*experimenting. will hopefully work when render allows us to pass binary data or input streams or something
+  render contentType: 'image/jpeg', length: test.length(), data: img
+  render contentType: 'image/jpeg', length: test.length(), data: new String(img, "ISO-8859-1")
+  */
+
+  /* working
+  def html = """
+<!DOCTYPE HTML>
+<html>
+<head><title>Ring Snapshot from Hubitat</title></head>
+<body><img src=\"data:image/png;base64,${img.encodeBase64().toString()}\" alt=\"Snapshot\" /></body>
+</html>
+"""
+  render contentType: "text/html", data: html
+  */
+
+  //onerror=\"this.src='${getFullApiServerUrl()}/snapshot/${child.getDataValue("device_id")}?access_token=${atomicState.accessToken}'; this.onerror=null;\
+
+  String strImg
+  if (!img || img.length == 0) {
+    logTrace "Default to missing image"
+    strImg = MISSING_IMG
+  }
+  else {
+    strImg = "data:image/png;base64,${img.encodeBase64().toString()}"
+  }
+
+  //data:image/png;base64,${img.encodeBase64().toString()}
+
+  /* working. thanks dman */
+  render contentType: "image/svg+xml", data: "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" " +
+    "height=\"360\" width=\"640\"><image width=\"640\" height=\"360\" xlink:href=\"${strImg}\"/></svg>", status: 200
+
 }
 
-private getTEXT() {
-  return 'text/plain'
+@Field static String MISSING_IMG = "data:image/png;base64,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"
+
+def snapshotOption(cam, value) {
+  if (!state.snappables) {
+    state.snappables = [:]
+  }
+  state.snappables[cam] = value
 }
 
-private getFORM() {
-  return 'application/x-www-form-urlencoded'
-}
-
-private getALL() {
-  return '*/*'
-}
+@Field static def snapshotInvertals = [
+  30: "30 Seconds",
+  60: "1 Minute",
+  90: "1.5 Minutes",
+  120: "2 Minutes",
+  180: "3 Minutes",
+  240: "4 Minutes",
+  300: "5 Minutes",
+  360: "6 Minutes",
+  600: "10 Minutes",
+  720: "12 Minutes",
+  900: "15 Minutes",
+  1200: "20 Minutes",
+  1800: "30 Minutes",
+  3600: "1 Hour",
+  7200: "2 Hours",
+  10800: "3 Hours",
+  14400: "4 Hours",
+  21600: "6 Hours",
+  28800: "8 Hours",
+  43200: "12 Hours",
+  86400: "24 Hours"
+]
 
 private getRequests(parts) {
   //logTrace "getRequest(parts)"
@@ -860,11 +1148,8 @@ private getRequests(parts) {
       params: [
         uri: "https://api.ring.com",
         path: "/clients_api/dings/active",
+        query: ["api_version": 11],
         contentType: JSON
-      ],
-      headers: [
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36",
-        "hardware_id": state.appDeviceId
       ]
     ],
     "device-control": [
@@ -902,6 +1187,57 @@ private getRequests(parts) {
         //textParser: true
       ],
       query: ["locationID": "${selectedLocations}"]
+    ],
+    "mode-set": [
+      method: POST,
+      type: "bearer",
+      params: [
+        uri: "https://prd-ring-web-us.prd.rings.solutions",
+        path: "/api/v1/mode/location/${getSelectedLocation()?.id}",
+        query: ["api_version": "11"],
+        contentType: JSON,
+        requestContentType: JSON,
+        body: [
+          "mode": "${parts.mode}", "readOnly": true
+        ]
+      ],
+      headers: [
+        "User-Agent": "android:com.ringapp:3.25.0(26452333)",
+        "Hardware_ID": state.appDeviceId
+      ]
+    ],
+    "mode-get": [
+      method: GET,
+      type: "bearer",
+      params: [
+        uri: "https://prd-ring-web-us.prd.rings.solutions",
+        path: "/api/v1/mode/location/${getSelectedLocation()?.id}",
+        query: ["api_version": "11"],
+        contentType: JSON,
+        requestContentType: JSON,
+      ],
+      headers: [
+        "User-Agent": "android:com.ringapp:3.25.0(26452333)",
+        "Hardware_ID": state.appDeviceId
+      ]
+    ],
+    "mode-settings": [
+      method: GET,
+      type: "bearer",
+      params: [
+        uri: "https://prd-ring-web-us.prd.rings.solutions",
+        path: "/api/v1/mode/location/${getSelectedLocation()?.id}/settings",
+        query: ["api_version": "11"],
+        contentType: JSON,
+        requestContentType: JSON,
+        body: [
+          "mode": "${parts.mode}", "readOnly": true
+        ]
+      ],
+      headers: [
+        "User-Agent": "android:com.ringapp:3.25.0(26452333)",
+        "Hardware_ID": state.appDeviceId
+      ]
     ],
     /*
     "refresh-device": [
@@ -960,13 +1296,13 @@ private getRequests(parts) {
         path: "/clients_api/snapshots/timestamps",
         requestContentType: JSON,
         body: [
-          "doorbot_ids": [getRingDeviceId(parts.dni)]
+          "doorbot_ids": parts.snappables
         ]
       ],
       headers: [
-        "User-Agent": "ring_official_windows/2.4.0",
         "Hardware_ID": state.appDeviceId,
-        "Accept": "application.vnd.api.v11+json"
+        "Accept": "application.vnd.api.v11+json",
+        "Accept-Encoding": "gzip"
       ]
     ],
     "snapshot-image": [
@@ -977,6 +1313,40 @@ private getRequests(parts) {
         uri: "https://api.ring.com",
         path: "/clients_api/snapshots/image/${getRingDeviceId(parts.dni)}",
         requestContentType: JSON
+      ],
+      headers: [
+        "User-Agent": "ring_official_windows/2.4.0",
+        "Hardware_ID": state.appDeviceId,
+        "Accept": "application.vnd.api.v11+json"
+      ]
+    ],
+    "snapshot-image-tmp": [
+      method: GET,
+      synchronous: true,
+      type: "bearer",
+      params: [
+        uri: "https://api.ring.com",
+        path: "/clients_api/snapshots/image/${getRingDeviceId(parts.dni)}",
+        requestContentType: JSON
+      ],
+      headers: [
+        "Hardware_ID": state.appDeviceId,
+        "Accept": "application.vnd.api.v11+json",
+        'Accept-Encoding': 'gzip, deflate',
+      ]
+    ],
+    "snapshot-update": [
+      method: PUT,
+      synchronous: false,
+      type: "bearer",
+      params: [
+        uri: "https://api.ring.com",
+        path: "/clients_api/snapshots/update_all",
+        requestContentType: JSON,
+        body: [
+          "refresh": true,
+          "doorbot_ids": state.dingables.collect { it -> it.toInteger() }
+        ]
       ],
       headers: [
         "User-Agent": "ring_official_windows/2.4.0",
@@ -1009,21 +1379,30 @@ private getRequests(parts) {
         path: "/api/v1/rs/masterkey?locationId=${selectedLocations}",
         contentType: JSON
       ]
+    ],
+    "snooze-get": [
+      method: GET,
+      type: "bearer",
+      params: [
+        uri: "https://app.ring.com",
+        path: "notification_settings/v1/locations/${getSelectedLocation()?.id}/snooze/motion",
+        contentType: JSON
+      ]
     ]
     //https://cloud.hubitat.com/api/[HUBUID]/apps/[APPID]/devices/all?access_token=[maker access token]
   ]
 }
 
-@Field
-static standardHeaders = [
-  'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36"
+@Field static def standardHeaders = [
+  //'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36"
   //,'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 6.0.1; Nexus 7 Build/MOB30X)"
   //,'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 7.1.2; Nexus 4 Build/NZH54D)"
-  , 'accept-encoding': 'gzip, deflate'
-  , 'Connection': 'keep-alive'
+  'User-Agent': 'android:com.ringapp:3.25.0(26452333)',
+  'app_brand': 'ring',
+  'Accept-Encoding': 'gzip, deflate',
+  'Connection': 'Keep-Alive',
   //, 'Accept': '*/*'
 ]
-
 
 def parse(String description) {
   logDebug "parse(String description)"
@@ -1103,7 +1482,8 @@ def formatParams(request, type, data) {
     query << [api_version: 9, auth_token: state.authentication_token]
   }
   if (request.headers) {
-    headers << request.headers
+    //headers << request.headers
+    request.headers.each { headers[it.key] = it.value }
   }
   params << [headers: headers]
   if (request.query) {
@@ -1166,6 +1546,7 @@ def doSynchronousAction(type, method, params) {
     }
     else {
       log.warn "HTTP Exception received on ${type}"
+      log.warn "method: $method with params $params"
       log.warn "exception: ${ex} cause: ${ex.getCause()}"
     }
   }
@@ -1191,12 +1572,17 @@ def responseHandler(response, params) {
     if (params.method == "auth") {
       state.access_token = response.data.access_token
       state.refresh_token = response.data.refresh_token
-      logInfo "Authenticated, Token Found."
+      logInfo "Authenticated and token found."
       logDebug "access token: ${state.access_token}"
       logDebug "refresh token: ${state.refresh_token}"
       def result = state.access_token && state.access_token != "EMPTY" && state.refresh_token
       if (result) {
         state.holdRequests = false
+        if (response.data.expires_in && response.data.expires_in.toString().isInteger()) {
+          int interval = response.data.expires_in.toInteger()
+          logInfo "OAuth token expires in ${interval} seconds... Scheduling refresh in ${interval - 20} seconds."
+          runIn(interval - 20, authenticate)
+        }
       }
       return result
     }
@@ -1206,6 +1592,7 @@ def responseHandler(response, params) {
     else if (params.method == "devices") {
       def body = response.data
       body.doorbots.each { body.stickup_cams << it }
+      body.authorized_doorbots.each { body.stickup_cams << it }
       body.chimes.each { body.stickup_cams << it }
       body.base_stations.each { body.stickup_cams << it }
       body.beams_bridges.each { body.stickup_cams << it }
@@ -1223,7 +1610,7 @@ def responseHandler(response, params) {
         getChildDevice(getFormattedDNI(deviceInfo.id))?.childParse(params.method, [response: response.getStatus(), msg: deviceInfo])
       }
     }
-    else if (params.method == "device-control" || params.method == "device-set" || params.method == "tickets") {
+    else if (["device-control", "device-set", "tickets", "mode-set", "mode-get"].contains(params.method)) {
       def body = response.data ? response.getJson() : null
       logTrace "body: $body"
       getChildDevice(params.data.dni).childParse(params.method, [
@@ -1234,15 +1621,22 @@ def responseHandler(response, params) {
         msg: body
       ])
     }
-    else if (params.method == "snapshot-image") {
-      response.properties.each { log.warn it }
-      getChildDevice(params.data.dni).childParse(params.method, [
-        response: response.getStatus(),
-        action: params.data.action,
-        kind: params.data.params?.kind,
-        //jpg: "data:image/png;base64,${response.data.encodeBase64().toString()}"
-        jpg: "<img src=\"data:image/png;base64,${response.data.encodeBase64().toString()}\" alt=\"Snapshot\" />"
-      ])
+    else if (params.method == "snapshot-update" || params.method == "history" || params.method == "snapshot-timestamps") {
+      logDebug "${params.method} successful"
+      logTrace "body: ${response.data ? response.getJson() : null}"
+    }
+    else if (params.method == "snapshot-image" || params.method == "snapshot-image-tmp") {
+      byte[] array = new byte[response.data.available()];
+      response.data.read(array);
+      return array
+
+      //getChildDevice(params.data.dni).childParse(params.method, [
+      //  response: response.getStatus(),
+      //  action: params.data.action,
+      //  kind: params.data.params?.kind,
+      //jpg: "data:image/png;base64,${response.data.encodeBase64().toString()}"
+      //  jpg: "<img src=\"data:image/png;base64,${response.data.encodeBase64().toString()}\" alt=\"Snapshot\" />"
+      //])
     }
     //else if (params.method == "tickets") {
     //  getChildDevice(data.dni).childParse(type, [response: resp.getStatus(), msg: body])
@@ -1268,7 +1662,6 @@ def responseHandler(response, params) {
     }
     else {
       log.error "Unhandled method!"
-      response.properties.each { log.warn it }
       if (response.data) {
         log.error "Data: ${response.data}"
       }
@@ -1277,10 +1670,55 @@ def responseHandler(response, params) {
   }
 }
 
+def getAPIDevice(location) {
+  if (!location) {
+    location = getSelectedLocation()
+  }
+  def formattedDNI = RING_API_DNI + "||" + location.id
+  def d = getChildDevice(formattedDNI)
+  if (!d) {
+    def oldDNI = getChildDevice("RING-WS_API_DNI")
+    //migrate if it's the old DNI
+    if (oldDNI) {
+      oldDNI.deviceNetworkId = formattedDNI
+      oldDNI.updateDataValue("device_id", formattedDNI)
+      oldDNI.updateDataValue("kind", RING_API_DNI)
+      oldDNI.updateDataValue("kind_name", DEVICE_TYPES[RING_API_DNI].name)
+      d = oldDNI
+      log.warn "Migrated existing API device ${oldDNI.label} to new DNI ${formattedDNI}..."
+    }
+    //create otherwise
+    else {
+      def driver = DEVICE_TYPES[RING_API_DNI].driver
+      def data = [
+        "device_id": formattedDNI,
+        "kind": RING_API_DNI,
+        "kind_name": DEVICE_TYPES[RING_API_DNI].name
+      ]
+      d = createDevice(driver, formattedDNI, location.name + " Location", data)
+      d.initialize()
+      d.refresh()
+      logInfo "${DEVICE_TYPES[RING_API_DNI].name} with ID ${formattedDNI} created..."
+    }
+  }
+  return d
+}
+
+def createDevice(driver, id, label, data) {
+  return addChildDevice("ring-hubitat-codahq", driver, id, null, ["label": label, "data": data])
+}
+
 def loggedIn() {
   logDebug "loggedIn()"
   logTrace "state.access_token ${state.access_token}"
   return state.access_token && state.access_token != "EMPTY"
+}
+
+def getSelectedLocation() {
+  def loc = state.locationOptions.find { location ->
+    selectedLocations.contains(location.key) || selectedLocations.equals(location.key)
+  }
+  return loc ? [id: loc.key, name: loc.value] : null
 }
 
 //logging help methods
@@ -1316,3 +1754,75 @@ def generateAppDeviceId() {
   logInfo "Device ID generated: ${result}"
   state.appDeviceId = result
 }
+
+def isHub(kind) {
+  return HUB_TYPES.contains(kind)
+}
+
+def isOAuthEnabled() {
+  def oauthEnabled = true
+  try {
+    if (!state.accessToken) {
+      createAccessToken()
+    }
+  }
+  catch (ex) {
+    oauthEnabled = false
+  }
+  return oauthEnabled
+}
+
+//Constants
+@Field static def RING_API_DNI = "WS_API_DNI"
+@Field static def GET = "httpGet"
+@Field static def POST = 'httpPost'
+@Field static def PUT = 'httpPut'
+@Field static def JSON = 'application/json'
+@Field static def TEXT = 'text/plain'
+@Field static def FORM = 'application/x-www-form-urlencoded'
+@Field static def ALL = '*/*'
+
+@Field static def RINGABLES = [
+  "doorbell",
+  "doorbell_v3",
+  "doorbell_v4",
+  "doorbell_v5",
+  "doorbell_portal",
+  "doorbell_scallop_lite",
+  "lpd_v1",
+  "lpd_v2",
+  "jbox_v1"
+]
+
+@Field static def DEVICE_TYPES = [
+  "WS_API_DNI": [name: "Ring API Virtual Device", driver: "Ring API Virtual Device", dingable: false],
+  "hp_cam_v1": [name: "Ring Floodlight Cam", driver: "Ring Virtual Light with Siren", dingable: true],
+  "hp_cam_v2": [name: "Ring Spotlight Cam Wired", driver: "Ring Virtual Light with Siren", dingable: true],
+  "floodlight_v2": [name: "Ring Floodlight Cam Wired", driver: "Ring Virtual Light with Siren", dingable: true],
+  "stickup_cam": [name: "Ring Original Stick Up Cam", driver: "Ring Virtual Camera", dingable: true],
+  "stickup_cam_v3": [name: "Ring Stick Up Cam", driver: "Ring Virtual Camera", dingable: true],
+  "stickup_cam_v4": [name: "Ring Spotlight Cam Battery", driver: "Ring Virtual Light", dingable: true],
+  "stickup_cam_lunar": [name: "Ring Stick Up Cam Battery", driver: "Ring Virtual Camera with Siren", dingable: true],
+  "cocoa_camera": [name: "Ring Stick Up Cam Battery", driver: "Ring Virtual Camera with Siren", dingable: true],
+  "stickup_cam_elite": [name: "Ring Stick Up Cam Wired", driver: "Ring Virtual Camera with Siren", dingable: true],
+  "stickup_cam_mini": [name: "Ring Indoor Cam", driver: "Ring Virtual Camera with Siren", dingable: true],
+  "doorbell": [name: "Ring Video Doorbell", driver: "Ring Virtual Camera", dingable: true],
+  "doorbell_v3": [name: "Ring Video Doorbell", driver: "Ring Virtual Camera", dingable: true],
+  "doorbell_v4": [name: "Ring Video Doorbell 2", driver: "Ring Virtual Camera", dingable: true],
+  "doorbell_v5": [name: "Ring Video Doorbell 2", driver: "Ring Virtual Camera", dingable: true],
+  "doorbell_scallop_lite": [name: "Ring Video Doorbell 3", driver: "Ring Virtual Camera", dingable: true],
+  "doorbell_portal": [name: "Ring Peephole Cam", driver: "Ring Virtual Camera", dingable: true],
+  "lpd_v1": [name: "Ring Video Doorbell Pro", driver: "Ring Virtual Camera", dingable: true],
+  "lpd_v2": [name: "Ring Video Doorbell Pro 2", driver: "Ring Virtual Camera", dingable: true],
+  "jbox_v1": [name: "Ring Video Doorbell Elite", driver: "Ring Virtual Camera", dingable: true],
+  "chime": [name: "Ring Chime", driver: "Ring Virtual Chime", dingable: false],
+  "chime_pro": [name: "Ring Chime Pro", driver: "Ring Virtual Chime", dingable: false],
+  "chime_pro_v2": [name: "Ring Chime Pro (v2)", driver: "Ring Virtual Chime", dingable: false],
+  "base_station_v1": [name: "Ring Alarm Base Station", driver: "SHOULD NOT SEE THIS", dingable: false],
+  "beams_bridge_v1": [name: "Ring Bridge Hub", driver: "SHOULD NOT SEE THIS", dingable: false]
+]
+
+@Field static def HUB_TYPES = [
+  "base_station_v1",
+  "beams_bridge_v1"
+]

@@ -24,12 +24,17 @@
  *  2020-02-29: Support for Retrofit Alarm Kit
  *              Supressed more websocket nonsense logging errors
  *              Changed namespace
+ *  2020-05-11: Support for non-alarm modes (Ring Modes)
+ *              Changes to auto-create hub/bridge devices
+ *              Optimization around uncreated devices
+ *
  *
  */
 
 import groovy.json.JsonSlurper
 import groovy.json.JsonOutput
 import hubitat.helper.InterfaceUtils
+import groovy.transform.Field
 
 metadata {
   definition(name: "Ring API Virtual Device", namespace: "ring-hubitat-codahq", author: "Ben Rimmasch",
@@ -39,16 +44,19 @@ metadata {
     capability "Initialize"
     capability "Refresh"
 
-    //command "testCommand"
-
+    attribute "mode", "string"
     attribute "websocket", "string"
+
+    //command "testCommand"
+    command "setMode", [[name: "Set Mode*", type: "ENUM", description: "Set the Location's mode", constraints: ["Disarmed", "Home", "Away"]]]
   }
 
   preferences {
     input name: "watchDogInterval", type: "number", range: 10..1440, title: "Watchdog Interval", description: "Duration in minutes between checks", defaultValue: 60, required: true
+    input name: "suppressMissingDeviceMessages", type: "bool", title: "Suppress log messages for missing/deleted devices", defaultValue: false
     input name: "descriptionTextEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
-    input name: "logEnable", type: "bool", title: "Enable debug logging", defaultValue: true
-    input name: "traceLogEnable", type: "bool", title: "Enable trace logging", defaultValue: true
+    input name: "logEnable", type: "bool", title: "Enable debug logging", defaultValue: false
+    input name: "traceLogEnable", type: "bool", title: "Enable trace logging", defaultValue: false
   }
 }
 
@@ -85,13 +93,30 @@ def testCommand() {
 
 }
 
+def setMode(mode) {
+  logDebug "setMode(${mode})"
+  if (!state.alarmCapable) {
+    //TODO: if we ever get a this pushed to us then only allow to change it when it's different
+    parent.simpleRequest("mode-set", [mode: mode.toLowerCase(), dni: device.deviceNetworkId])
+  }
+  else {
+    def msg = "Not supported from API device. Ring account has alarm present so use alarm modes!"
+    log.error msg
+    sendEvent(name: "Invalid Command", value: msg)
+  }
+}
 
 def initialize() {
   logDebug "initialize()"
   //old method of getting websocket auth
   //parent.simpleRequest("ws-connect", [dni: device.deviceNetworkId])
-  parent.simpleRequest("tickets", [dni: device.deviceNetworkId])
-  state.seq = 0
+  if (isWebSocketCapable()) {
+    parent.simpleRequest("tickets", [dni: device.deviceNetworkId])
+    state.seq = 0
+  }
+  else {
+    log.warn "Nothing to initialize..."
+  }
 }
 
 def updated() {
@@ -107,6 +132,35 @@ def createDevices(zid) {
   refresh(zid)
 }
 
+def setState(attr, value, type) {
+  if (type == "array-add") {
+    if (state."$attr" == null) {
+      state."$attr" = []
+    }
+    state."$attr" << value
+  }
+  else if (type == "bool-set") {
+    state."$attr" = value
+  }
+  else {
+    log.error "unknown type $type!"
+  }
+}
+
+def resetState(attr) {
+  state.remove(attr)
+}
+
+def isWebSocketCapable() {
+  return state.createableHubs && state.createableHubs.size() > 0
+}
+
+def isTypePresent(kind) {
+  return getChildDevices()?.find {
+    it.getDataValue("type") == kind
+  } != null
+}
+
 def refresh(zid) {
   logDebug "refresh(${zid})"
   unschedule()
@@ -118,6 +172,9 @@ def refresh(zid) {
     }
   }
   watchDogChecking()
+  if (!state.alarmCapable) {
+    parent.simpleRequest("mode-get", [mode: "disarmed", dni: device.deviceNetworkId])
+  }
 }
 
 def watchDogChecking() {
@@ -137,7 +194,6 @@ def watchDogChecking() {
   runIn(watchDogInterval * 60, watchDogChecking)  //time in seconds
 }
 
-
 def childParse(type, params = []) {
   logDebug "childParse(type, params)"
   logTrace "type ${type}"
@@ -153,11 +209,15 @@ def childParse(type, params = []) {
     //simpleRequest("adduser", [code: params.name, dst: "[HUB_ZID]" /*params.dst*/])
     //simpleRequest("enableuser", [code: params.name, dst: "[HUB_ZID]" /*params.dst*/, acess_code_zid: "[ACCESS_CODE_ZID]"])
   }
+  else if (type == "mode-set" || type == "mode-get") {
+    logTrace "mode: ${params.msg.mode}"
+    logInfo "Mode set to ${params.msg.mode.capitalize()}"
+    sendEvent(name: "mode", value: params.msg.mode)
+  }
   else {
     log.error "Unhandled type ${type}"
   }
 }
-
 
 def simpleRequest(type, params = [:]) {
   logDebug "simpleRequest(${type})"
@@ -360,9 +420,19 @@ def initWebsocket(json) {
   }
   else if (json.host) {
     wsUrl = "wss://${json.host}/socket.io/?authcode=${json.ticket}&ack=false&EIO=3&transport=websocket"
-    state.hubs = json.assets.collect { hub ->
+    state.hubs = json.assets.findAll { state.createableHubs.contains(it.kind) }.collect { hub ->
       [doorbotId: hub.doorbotId, kind: hub.kind, zid: hub.uuid]
     }
+    /*
+    if (!state.hubs) {
+      state.hubs = []
+    }
+    newHubs.each { nHub ->
+      def eHub = state.hubs.find {it.doorbotId == nHub.doorbotId}
+      if (!dHub) {
+        state.hubs << nHub
+      }
+    }*/
   }
   else {
     log.error "Can't find the server: ${json}"
@@ -422,14 +492,28 @@ def parse(String description) {
     def deviceInfos
 
     if (json[0].equals("DataUpdate")) {
-      deviceInfos = extractDeviceInfos(json[1])
+      //only keep device infos for devices that were selected in the app
+      if (state.createableHubs.contains(json[1].context.assetKind)) {
+        deviceInfos = extractDeviceInfos(json[1])
+      }
+      //else {
+      //  logTrace "Discarded update from hub ${json[1].context.assetKind}"
+      //}
     }
     else if (json[0].equals("message") && json[1].msg == "DeviceInfoDocGetList" && json[1].datatype == "DeviceInfoDocType") {
-      deviceInfos = extractDeviceInfos(json[1])
-
-      if (!getChildByZID(json[1].context.assetId)) {
-        createDevice([deviceType: json[1].context.assetKind, zid: json[1].context.assetId, src: json[1].src])
+      //only keep device infos for devices that were selected in the app
+      if (state.createableHubs.contains(json[1].context.assetKind)) {
+        deviceInfos = extractDeviceInfos(json[1])
+        //if the hub for these device infos doesn't exist then create it
+        if (!getChildByZID(json[1].context.assetId)) {
+          def d = createDevice([deviceType: json[1].context.assetKind, zid: json[1].context.assetId, src: json[1].src])
+          //might as well create the devices
+          state.createDevices = true
+        }
       }
+      //else {
+      //  logTrace "Discarded device list from hub ${json[1].context.assetKind}"
+      //}
     }
     else if (json[0].equals("message") && json[1].msg == "DeviceInfoSet") {
       if (json[1].status == 0) {
@@ -470,12 +554,22 @@ def parse(String description) {
       }
       else {
         if (state.createDevices) {
-          createDevice(it)
+          if (it.deviceType != "group.light-group.beams") {
+            createDevice(it)
+          }
+          else {
+            queueCreate(it)
+          }
         }
-        sendUpdate(it)
+        if (it.deviceType != "group.light-group.beams") {
+          sendUpdate(it)
+        }
       }
     }
-    if (state.createDevices) state.createDevices = false
+    if (state.createDevices) {
+      processCreateQueue()
+      state.createDevices = false
+    }
   }
 }
 
@@ -638,14 +732,26 @@ def extractDeviceInfos(json) {
   return deviceInfos
 }
 
-
 def createDevice(deviceInfo) {
   logDebug "createDevice(deviceInfo)"
   logTrace "deviceInfo: ${deviceInfo}"
 
-  if (deviceInfo == null || deviceInfo.deviceType == null || DEVICE_TYPES[deviceInfo.deviceType] == null || DEVICE_TYPES[deviceInfo.deviceType].hidden) {
+  //quick check
+  if (deviceInfo == null
+    || deviceInfo.deviceType == null
+    || DEVICE_TYPES[deviceInfo.deviceType] == null
+    || DEVICE_TYPES[deviceInfo.deviceType].hidden) {
     logDebug "Not a creatable device. ${deviceInfo.deviceType}"
     return
+  }
+
+  //deeper check to enable auto-create on initialize
+  if (!isHub(deviceInfo.deviceType)) {
+    def parentKind = state.hubs.find { it.zid == deviceInfo.src }.kind
+    if (!state.createableHubs.contains(parentKind)) {
+      logDebug "not creating ${deviceInfo.name} because parent ${parentKind} is not creatable!"
+      return
+    }
   }
 
   def d = getChildDevices()?.find {
@@ -670,16 +776,37 @@ def createDevice(deviceInfo) {
 
       d = addChildDevice("ring-hubitat-codahq", DEVICE_TYPES[deviceInfo.deviceType].name, getFormattedDNI(deviceInfo.zid), data)
       d.label = deviceInfo.name ?: DEVICE_TYPES[deviceInfo.deviceType].name
-      log.warn "Succesfully added ${deviceInfo.deviceType} with dni: ${getFormattedDNI(deviceInfo.zid)}"
+      log.warn "Successfully added ${deviceInfo.deviceType} with dni: ${getFormattedDNI(deviceInfo.zid)}"
     }
     catch (e) {
-      log.error "An error occured ${e}"
+      if (e.toString().replace(DEVICE_TYPES[deviceInfo.deviceType].name, "") ==
+        "com.hubitat.app.exception.UnknownDeviceTypeException: Device type '' in namespace 'ring-hubitat-codahq' not found") {
+        log.error '<b style="color: red;">The "' + DEVICE_TYPES[deviceInfo.deviceType].name + '" driver was not found and needs to be installed.</b>\r\n'
+      }
+      else {
+        log.error "Error adding device: ${e}"
+      }
     }
   }
   else {
     logDebug "Device ${d} already exists. No need to create."
   }
+  return d
+}
 
+def queueCreate(deviceInfo) {
+  if (!state.queuedCreates) {
+    state.queuedCreates = []
+  }
+  state.queuedCreates << deviceInfo
+}
+
+def processCreateQueue() {
+  state.queuedCreates.each {
+    createDevice(it)
+    sendUpdate(it)
+  }
+  state.remove("queuedCreates")
 }
 
 def sendUpdate(deviceInfo) {
@@ -700,7 +827,9 @@ def sendUpdate(deviceInfo) {
     it.deviceNetworkId == getFormattedDNI(dni)
   }
   if (!d) {
-    log.warn "Couldn't find device ${deviceInfo.name} of type ${deviceInfo.deviceType} with zid ${deviceInfo.zid}"
+    if (!suppressMissingDeviceMessages) {
+      log.warn "Couldn't find device ${deviceInfo.name ?: deviceInfo.deviceName} of type ${deviceInfo.deviceType} with zid ${deviceInfo.zid}"
+    }
   }
   else {
     logDebug "Updating device ${d}"
@@ -719,51 +848,14 @@ def sendPassthru(deviceInfo) {
     it.deviceNetworkId == getFormattedDNI(deviceInfo.zid)
   }
   if (!d) {
-    log.warn "Couldn't find device ${deviceInfo.zid} for passthru"
+    if (!suppressMissingDeviceMessages) {
+      log.warn "Couldn't find device ${deviceInfo.zid} for passthru"
+    }
   }
   else {
     logDebug "Passthru for device ${d}"
     d.setValues(deviceInfo)
   }
-}
-
-private getMESSAGE_PREFIX() {
-  return "42"
-}
-
-private getDEVICE_TYPES() {
-  return [
-    //physical alarm devices
-    "sensor.contact": [name: "Ring Virtual Contact Sensor", hidden: false],
-    "sensor.tilt": [name: "Ring Virtual Contact Sensor", hidden: false],
-    "sensor.zone": [name: "Ring Virtual Contact Sensor", hidden: false],
-    "sensor.motion": [name: "Ring Virtual Motion Sensor", hidden: false],
-    "sensor.flood-freeze": [name: "Ring Virtual Alarm Flood & Freeze Sensor", hidden: false],
-    "listener.smoke-co": [name: "Ring Virtual Alarm Smoke & CO Listener", hidden: false],
-    "alarm.co": [name: "Ring Virtual CO Alarm", hidden: false],
-    "alarm.smoke": [name: "Ring Virtual Smoke Alarm", hidden: false],
-    "range-extender.zwave": [name: "Ring Virtual Alarm Range Extender", hidden: false],
-    "lock": [name: "Ring Virtual Lock", hidden: false],
-    "security-keypad": [name: "Ring Virtual Keypad", hidden: false],
-    "base_station_v1": [name: "Ring Virtual Alarm Hub", hidden: false],
-    "siren": [name: "Ring Virtual Siren", hidden: false],
-    "switch": [name: "Ring Virtual Switch", hidden: false],
-    "bridge.flatline": [name: "Ring Virtual Retrofit Alarm Kit", hidden: false],
-    //virtual alarm devices
-    "adapter.zwave": [name: "Ring Z-Wave Adapter", hidden: true],
-    "adapter.zigbee": [name: "Ring Zigbee Adapter", hidden: true],
-    "security-panel": [name: "Ring Alarm Security Panel", hidden: true],
-    "hub.redsky": [name: "Ring Alarm Base Station", hidden: true],
-    "access-code.vault": [name: "Code Vault", hidden: true],
-    "access-code": [name: "Access Code", hidden: true],
-    //physical beams devices
-    "switch.multilevel.beams": [name: "Ring Virtual Beams Light", hidden: false],
-    "motion-sensor.beams": [name: "Ring Virtual Beams Motion Sensor", hidden: false],
-    "group.light-group.beams": [name: "Ring Virtual Beams Group", hidden: false],
-    "beams_bridge_v1": [name: "Ring Virtual Beams Bridge", hidden: false],
-    //virtual beams devices
-    "adapter.ringnet": [name: "Ring Beams Ringnet Adapter", hidden: true]
-  ]
 }
 
 def String getFormattedDNI(id) {
@@ -787,10 +879,51 @@ def boolean isParentRequest(type) {
   return ["refresh-security-device"].contains(type)
 }
 
-private getIGNORED_MSG_TYPES() {
-  return [
-    "SessionInfo",
-    "SubscriptionTopicsInfo"
-  ]
+def isHub(kind) {
+  return HUB_TYPES.contains(kind)
 }
 
+@Field static def DEVICE_TYPES = [
+  //physical alarm devices
+  "sensor.contact": [name: "Ring Virtual Contact Sensor", hidden: false],
+  "sensor.tilt": [name: "Ring Virtual Contact Sensor", hidden: false],
+  "sensor.zone": [name: "Ring Virtual Contact Sensor", hidden: false],
+  "sensor.motion": [name: "Ring Virtual Motion Sensor", hidden: false],
+  "sensor.flood-freeze": [name: "Ring Virtual Alarm Flood & Freeze Sensor", hidden: false],
+  "listener.smoke-co": [name: "Ring Virtual Alarm Smoke & CO Listener", hidden: false],
+  "alarm.co": [name: "Ring Virtual CO Alarm", hidden: false],
+  "alarm.smoke": [name: "Ring Virtual Smoke Alarm", hidden: false],
+  "range-extender.zwave": [name: "Ring Virtual Alarm Range Extender", hidden: false],
+  "lock": [name: "Ring Virtual Lock", hidden: false],
+  "security-keypad": [name: "Ring Virtual Keypad", hidden: false],
+  "base_station_v1": [name: "Ring Virtual Alarm Hub", hidden: false],
+  "siren": [name: "Ring Virtual Siren", hidden: false],
+  "switch": [name: "Ring Virtual Switch", hidden: false],
+  "bridge.flatline": [name: "Ring Virtual Retrofit Alarm Kit", hidden: false],
+  //virtual alarm devices
+  "adapter.zwave": [name: "Ring Z-Wave Adapter", hidden: true],
+  "adapter.zigbee": [name: "Ring Zigbee Adapter", hidden: true],
+  "security-panel": [name: "Ring Alarm Security Panel", hidden: true],
+  "hub.redsky": [name: "Ring Alarm Base Station", hidden: true],
+  "access-code.vault": [name: "Code Vault", hidden: true],
+  "access-code": [name: "Access Code", hidden: true],
+  //physical beams devices
+  "switch.multilevel.beams": [name: "Ring Virtual Beams Light", hidden: false],
+  "motion-sensor.beams": [name: "Ring Virtual Beams Motion Sensor", hidden: false],
+  "group.light-group.beams": [name: "Ring Virtual Beams Group", hidden: false],
+  "beams_bridge_v1": [name: "Ring Virtual Beams Bridge", hidden: false],
+  //virtual beams devices
+  "adapter.ringnet": [name: "Ring Beams Ringnet Adapter", hidden: true]
+]
+
+@Field static def IGNORED_MSG_TYPES = [
+  "SessionInfo",
+  "SubscriptionTopicsInfo"
+]
+
+@Field static def HUB_TYPES = [
+  "base_station_v1",
+  "beams_bridge_v1"
+]
+
+@Field static def MESSAGE_PREFIX = "42"

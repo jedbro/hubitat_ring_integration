@@ -93,7 +93,7 @@ def setValues(deviceInfo) {
     state.signalStrength = deviceInfo.lastCommTime
   }
   if (deviceInfo.state?.groupMembers) {
-    state.members = deviceInfo.state?.groupMembers.collectEntries {
+    state.members = deviceInfo.state?.groupMembers?.collectEntries {
       def d = parent.getChildByZID(it)
       if (d) {
         [(d.deviceNetworkId): d.label]
