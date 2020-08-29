@@ -1,9 +1,9 @@
 {
   "packageName": "Hubitat Ring Integration (Unofficial)",
   "author": "codahq",
-  "version": "0.1",
+  "version": "0.3.1",
   "minimumHEVersion": "0.0",
-  "dateReleased": "2020-06-08",
+  "dateReleased": "2020-08-29",
   "apps": [
     {
       "id": "981fa0e5-b7c7-4459-a9ba-7ccdc51faa55",
@@ -11,8 +11,7 @@
       "namespace": "ring-hubitat-codahq",
       "location": "https://raw.githubusercontent.com/ardichoke/hubitat_ring_integration/master/src/apps/unofficial-ring-connect.groovy",
       "required": true,
-      "oauth": false,
-      "version": "0.2"
+      "oauth": true,
     }
   ],
   "drivers": [
@@ -177,5 +176,6 @@
       "location": "https://raw.githubusercontent.com/ardichoke/hubitat_ring_integration/master/src/drivers/ring-virtual-switch.groovy",
       "required": false
     }
-  ]
+  ],
+  "documentationLink": "https://github.com/ardichoke/hubitat_ring_integration/blob/master/README.md"
 }
