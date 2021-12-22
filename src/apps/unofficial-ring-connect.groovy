@@ -1807,6 +1807,7 @@ def isOAuthEnabled() {
   "beams_bridge_v1": [name: "Ring Bridge Hub", driver: "SHOULD NOT SEE THIS", dingable: false],
   "chime_pro_v2": [name: "Ring Chime Pro (v2)", driver: "Ring Virtual Chime", dingable: false],
   "chime_pro": [name: "Ring Chime Pro", driver: "Ring Virtual Chime", dingable: false],
+  "chime_v2": [name: "Ring Chime V2", driver: "Ring Virtual Chime", dingable: false],
   "chime": [name: "Ring Chime", driver: "Ring Virtual Chime", dingable: false],
   "cocoa_camera": [name: "Ring Stick Up Cam", driver: "Ring Virtual Camera with Siren", dingable: true],
   "cocoa_doorbell": [name: "Ring Video Doorbell 2020", driver: "Ring Virtual Camera", dingable: true],
