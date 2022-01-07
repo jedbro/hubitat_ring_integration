@@ -894,6 +894,7 @@ def isHub(kind) {
   "lock": [name: "Ring Virtual Lock", hidden: false],
   "security-keypad": [name: "Ring Virtual Keypad", hidden: false],
   "security-panic": [name: "Ring Virtual Panic Button", hidden: false],
+  "base_station_k1": [name: "Ring Virtual Alarm Hub Pro", hidden: false],
   "base_station_v1": [name: "Ring Virtual Alarm Hub", hidden: false],
   "siren": [name: "Ring Virtual Siren", hidden: false],
   "siren.outdoor-strobe": [name: "Ring Virtual Siren", hidden: false],
@@ -904,6 +905,7 @@ def isHub(kind) {
   "adapter.zigbee": [name: "Ring Zigbee Adapter", hidden: true],
   "security-panel": [name: "Ring Alarm Security Panel", hidden: true],
   "hub.redsky": [name: "Ring Alarm Base Station", hidden: true],
+  "hub.kili": [name: "Ring Alarm Pro Base Station", hidden: true],
   "access-code.vault": [name: "Code Vault", hidden: true],
   "access-code": [name: "Access Code", hidden: true],
   //physical beams devices
@@ -921,6 +923,7 @@ def isHub(kind) {
 ]
 
 @Field static def HUB_TYPES = [
+  "base_station_k1",
   "base_station_v1",
   "beams_bridge_v1"
 ]

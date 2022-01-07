@@ -164,7 +164,7 @@ def setVolume(vol) {
   if (device.currentValue("volume") != vol) {
     logTrace "requesting volume change from ${device.currentValue("volume")} to ${vol}"
     def data = ["volume": (vol == null ? 50 : vol).toDouble() / 100]
-    parent.simpleRequest("setdevice", [zid: device.getDataValue("hub.redsky-zid"), dst: null, data: data])
+    parent.simpleRequest("setdevice", [zid: getHubZid(), dst: null, data: data])
   }
   else {
     logInfo "Already at volume."
@@ -215,7 +215,15 @@ def setBrightness(brightness) {
   brightness = brightness > 100 ? 100 : brightness
   brightness = brightness < 0 ? 0 : brightness
   def data = ["brightness": (brightness == null ? 100 : brightness).toDouble() / 100]
-  parent.simpleRequest("setdevice", [zid: device.getDataValue("hub.redsky-zid"), dst: device.getDataValue("src"), data: data])
+  parent.simpleRequest("setdevice", [zid: getHubZid(), dst: device.getDataValue("src"), data: data])
+}
+
+String getHubZid() {
+  String hubZid = device.getDataValue("hub.redsky-zid")
+  if (hubZid == null) {
+    hubZid = device.getDataValue("hub.kili-zid")
+  }
+  return hubZid
 }
 
 private getRING_TO_HSM_MODE_MAP() {
@@ -368,7 +376,7 @@ def checkChanged(attribute, newStatus, unit=null) {
 }
 
 def saveImportantInfo(deviceInfo) {
-  for(deviceType in ['access-code.vault', 'adapter.zwave', 'hub.redsky', 'security-panel']) {
+  for(deviceType in ['access-code.vault', 'adapter.zwave', 'hub.redsky', 'hub.kili', 'security-panel']) {
     if (deviceInfo.deviceType == deviceType && device.getDataValue("${deviceType}-zid") != deviceInfo.zid) {
       device.updateDataValue("${deviceType}-zid", deviceInfo.zid)
     }
