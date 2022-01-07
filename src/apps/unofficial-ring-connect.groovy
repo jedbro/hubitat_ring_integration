@@ -1804,6 +1804,7 @@ def isOAuthEnabled() {
 @Field static def DEVICE_TYPES = [
   "WS_API_DNI": [name: "Ring API Virtual Device", driver: "Ring API Virtual Device", dingable: false],
   "base_station_v1": [name: "Ring Alarm Base Station", driver: "SHOULD NOT SEE THIS", dingable: false],
+  "base_station_k1": [name: "Ring Alarm Base Station Pro", driver: "SHOULD NOT SEE THIS", dingable: false],
   "beams_bridge_v1": [name: "Ring Bridge Hub", driver: "SHOULD NOT SEE THIS", dingable: false],
   "chime_pro_v2": [name: "Ring Chime Pro (v2)", driver: "Ring Virtual Chime", dingable: false],
   "chime_pro": [name: "Ring Chime Pro", driver: "Ring Virtual Chime", dingable: false],
@@ -1836,6 +1837,7 @@ def isOAuthEnabled() {
 ]
 
 @Field static def HUB_TYPES = [
+  "base_station_k1",
   "base_station_v1",
   "beams_bridge_v1"
 ]
