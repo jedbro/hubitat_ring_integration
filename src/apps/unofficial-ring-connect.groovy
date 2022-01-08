@@ -613,7 +613,7 @@ private discoverDevices() {
   def supportedIds = getDeviceIds()
   logTrace "supportedIds ${supportedIds}"
   state.devices = supportedIds
-  def alarmCapable = (state.devices.find { it.kind == "base_station_v1" }?.size() ?: 0) > 0
+  def alarmCapable = (state.devices.find { it.kind =~ /base_station_v1|base_station_k1/ }?.size() ?: 0) > 0
   getAPIDevice().setState("alarmCapable", alarmCapable, "bool-set")
 }
 
