@@ -368,7 +368,7 @@ def checkChanged(attribute, newStatus, unit=null) {
 }
 
 def saveImportantInfo(deviceInfo) {
-  for(deviceType in ['access-code.vault', 'adapter.zwave', 'hub.redsky', 'security-panel']) {
+  for(deviceType in ['access-code.vault', 'adapter.zwave', 'hub.redsky', 'hub.kili', 'security-panel']) {
     if (deviceInfo.deviceType == deviceType && device.getDataValue("${deviceType}-zid") != deviceInfo.zid) {
       device.updateDataValue("${deviceType}-zid", deviceInfo.zid)
     }
