@@ -904,6 +904,7 @@ def isHub(kind) {
   "adapter.zigbee": [name: "Ring Zigbee Adapter", hidden: true],
   "security-panel": [name: "Ring Alarm Security Panel", hidden: true],
   "hub.redsky": [name: "Ring Alarm Base Station", hidden: true],
+  "hub.kili": [name: "Ring Alarm Pro Base Station", hidden: true],
   "access-code.vault": [name: "Code Vault", hidden: true],
   "access-code": [name: "Access Code", hidden: true],
   //physical beams devices
