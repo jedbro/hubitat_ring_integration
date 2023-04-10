@@ -1701,6 +1701,7 @@ String getRingDeviceId(String id) {
   "doorbell_scallop_lite",
   "doorbell_oyster",
   "cocoa_doorbell",
+  "cocoa_doorbell_v2",
   "cocoa_floodlight",
   "lpd_v1",
   "lpd_v2",
@@ -1712,6 +1713,7 @@ String getRingDeviceId(String id) {
 @Field final static Set DINGABLES = [
   "cocoa_camera",
   "cocoa_doorbell",
+  "cocoa_doorbell_v2",
   "cocoa_floodlight",
   "doorbell_graham_cracker",
   "doorbell_portal",
@@ -1751,6 +1753,7 @@ String getRingDeviceId(String id) {
   "chime": [name: "Ring Chime", driver: "Ring Virtual Chime"],
   "cocoa_camera": [name: "Ring Stick Up Cam", driver: "Ring Virtual Camera with Siren"],
   "cocoa_doorbell": [name: "Ring Video Doorbell 2020", driver: "Ring Virtual Camera"],
+  "cocoa_doorbell_v2": [name: "Ring Video Doorbell 2023", driver: "Ring Virtual Camera"],
   "cocoa_floodlight": [name: "Ring Floodlight Cam Wired Plus", driver: "Ring Virtual Light with Siren"],
   "doorbell_graham_cracker": [name: "Ring Video Doorbell Wired", driver: "Ring Virtual Camera"],
   "doorbell_portal": [name: "Ring Peephole Cam", driver: "Ring Virtual Camera"],
