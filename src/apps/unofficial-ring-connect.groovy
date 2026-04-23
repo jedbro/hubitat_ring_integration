@@ -1799,11 +1799,13 @@ void periodicMaintenance() {
 
   if (state.snapshots) {
     // Remove old keys from snapshots that aren't enabled anymore
+    List<String> keysToRemove = []
     for (String snapshotDni in state.snapshots.keySet()) {
-      if (state.enabledSnappables.contains(getRingDeviceId(dni))) {
-        state.enabledSnappables.remove(snapshotDni)
+      if (!state.enabledSnappables.contains(getRingDeviceId(snapshotDni))) {
+        keysToRemove.add(snapshotDni)
       }
     }
+    keysToRemove.each { state.snapshots.remove(it) }
   }
 
   for (final setting in settings) {
