@@ -406,6 +406,7 @@ void loadAvailableDevices(List apiRequestDevicesResponse) {
   logDebug "loadAvailableDevices()"
 
   state.devices = []
+  List unrecognized = []
 
   for (final Map node in apiRequestDevicesResponse) {
     final String kind = node?.kind
@@ -413,11 +414,17 @@ void loadAvailableDevices(List apiRequestDevicesResponse) {
     if (!settings.selectedLocations.contains(node?.location_id)) {
       logDebug "loadAvailableDevices: Excluding ${kind} at location ${node.location_id} because it is not in selected locations ${settings.selectedLocations}"
     } else if (!DEVICE_TYPES.containsKey(kind)) {
-      logDebug "loadAvailableDevices: Excluding ${kind} at location ${node.location_id} because kind '${kind}' is not supported"
+      unrecognized.add([kind: kind, description: node?.description, id: node?.id, location_id: node?.location_id])
+      log.warn "loadAvailableDevices: Unrecognized device kind '${kind}' (description: '${node?.description}', id: ${node?.id}) at location ${node?.location_id}. Add an entry for kind '${kind}' to DEVICE_TYPES to support it."
     } else {
       logDebug "loadAvailableDevices: Including a ${kind} at location ${node.location_id}"
       state.devices.add([name: "${DEVICE_TYPES[kind].name} - ${node.description}", id: node.id, kind: node.kind])
     }
+  }
+
+  if (unrecognized) {
+    log.warn "loadAvailableDevices: Found ${unrecognized.size()} unrecognized device(s) not supported by this app: " +
+      unrecognized.collect { "kind='${it.kind}' (${it.description})" }.join(", ")
   }
 
   logTrace "loadAvailableDevices: supportedIds ${state.devices}"
@@ -1007,6 +1014,12 @@ List apiRequestDevices() {
       logTrace "apiRequestDevices succeeded, body: ${JsonOutput.toJson(body)}"
 
       // @note Intenionally leaving out "beams" because they are handled by the beams bridge device
+      final List<String> knownKeys = ['authorized_doorbots', 'base_stations', 'beams_bridges', 'chimes', 'doorbots', 'stickup_cams', 'beams']
+      final List<String> unknownKeys = body.keySet().findAll { !knownKeys.contains(it) }.toList()
+      if (unknownKeys) {
+        logDebug "apiRequestDevices: Response contains unrecognized top-level device category key(s) ${unknownKeys} which are not being scanned for devices. Devices under these keys will not show up in device discovery."
+      }
+
       retval = []
       for (final String key in ['authorized_doorbots', 'base_stations', 'beams_bridges', 'chimes', 'doorbots', 'stickup_cams']) {
         retval += body[key]
@@ -1761,12 +1774,19 @@ String getRingDeviceId(String id) {
   "chime_pro_v2": [name: "Ring Chime Pro (v2)", driver: "Ring Virtual Chime"],
   "chime_pro": [name: "Ring Chime Pro", driver: "Ring Virtual Chime"],
   "chime_v2": [name: "Ring Chime V2", driver: "Ring Virtual Chime"],
+  "chime_v4": [name: "Ring Chime (2nd Gen)", driver: "Ring Virtual Chime"],
   "chime": [name: "Ring Chime", driver: "Ring Virtual Chime"],
   "cocoa_camera": [name: "Ring Stick Up Cam", driver: "Ring Virtual Camera with Siren"],
+  "cocoa_camera_v2": [name: "Ring Stick Up Cam Plus", driver: "Ring Virtual Camera with Siren"],
+  "cocoa_camera_v3": [name: "Ring Stick Up Cam Pro 4k", driver: "Ring Virtual Camera with Siren"],
   "cocoa_doorbell": [name: "Ring Video Doorbell 2020", driver: "Ring Virtual Camera"],
-  "cocoa_doorbell_v2": [name: "Ring Video Doorbell 2023", driver: "Ring Virtual Camera"],
+  "cocoa_doorbell_v2": [name: "Ring Video Doorbell Pro 4k", driver: "Ring Virtual Camera"],
+  "cocoa_doorbell_v5": [name: "Ring Video Doorbell 2023", driver: "Ring Virtual Camera"],
+  "cocoa_doorbell_v6": [name: "Ring Video Doorbell 2023", driver: "Ring Virtual Camera"],
   "cocoa_floodlight": [name: "Ring Floodlight Cam Wired Plus", driver: "Ring Virtual Light with Siren"],
+  "cocoa_floodlight_v2": [name: "Ring Floodlight Pro 4k 2", driver: "Ring Virtual Light with Siren"],
   "cocoa_spotlight": [name: "Ring Spotlight Cam Plus", driver: "Ring Virtual Light with Siren", dingable: true],
+  "cocoa_spotlight_v2": [name: "Ring Spotlight 2K Pro", driver: "Ring Virtual Light with Siren", dingable: true],
   "doorbell_graham_cracker": [name: "Ring Video Doorbell Wired", driver: "Ring Virtual Camera"],
   "doorbell_portal": [name: "Ring Peephole Cam", driver: "Ring Virtual Camera"],
   "doorbell_oyster": [name: "Ring Video Doorbell 4", driver: "Ring Virtual Camera"],
@@ -1776,6 +1796,8 @@ String getRingDeviceId(String id) {
   "doorbell_v4": [name: "Ring Video Doorbell 2", driver: "Ring Virtual Camera"],
   "doorbell_v5": [name: "Ring Video Doorbell 2", driver: "Ring Virtual Camera"],
   "doorbell": [name: "Ring Video Doorbell", driver: "Ring Virtual Camera"],
+  "doorbot": [name: "Ring Video Doorbell", driver: "Ring Virtual Camera"],
+  "df_doorbell_clownfish": [name: "Ring Video Doorbell (Battery)", driver: "Ring Virtual Camera"],
   "floodlight_pro": [name: "Ring Floodlight Cam Wired Pro", driver: "Ring Virtual Light with Siren"],
   "floodlight_v2": [name: "Ring Floodlight Cam Wired", driver: "Ring Virtual Light with Siren"],
   "hp_cam_v1": [name: "Ring Floodlight Cam", driver: "Ring Virtual Light with Siren"],
@@ -1793,7 +1815,10 @@ String getRingDeviceId(String id) {
   "stickup_cam_medusa": [name: "Ring Stick Up Cam Pro", driver: "Ring Virtual Camera with Siren"],
   "stickup_cam_mini": [name: "Ring Indoor Cam", driver: "Ring Virtual Camera with Siren"],
   "stickup_cam_mini_v2": [name: "Ring Indoor Cam  (2nd gen)", driver: "Ring Virtual Camera with Siren"],
+  "stickup_cam_mini_ptz_v1": [name: "Ring Indoor Cam Pan-Tilt", driver: "Ring Virtual Camera with Siren"],
   "stickup_cam_v3": [name: "Ring Stick Up Cam (1st gen)", driver: "Ring Virtual Camera"],
   "stickup_cam_v4": [name: "Ring Spotlight Cam Battery/Solar", driver: "Ring Virtual Light"],
   "stickup_cam": [name: "Ring Stick Up Cam (1st gen)", driver: "Ring Virtual Camera"],
+  "hexa_camera_2_v1": [name: "Ring Elite Cam Gen 2 (140°)", driver: "Ring Virtual Camera with Siren"],
+  "hexa_camera_6_v1": [name: "Ring Elite Cam Gen 2 (360°)", driver: "Ring Virtual Camera with Siren"],
 ].asImmutable()
